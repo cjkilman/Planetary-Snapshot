@@ -43,91 +43,84 @@ function generateResetPlan() {
 }
 
 /**
- * Processes all planets for every character authenticated in GESI.
- * Resolves Factories, Extractors, Launchpads, and Storage Facilities.
+ * Processes all planets and includes an estimated tax cost for stored materials.
  */
 function runPlanetarySnapshot() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const characters = GESI.getAuthenticatedCharacterNames(); 
   
-  if (!characters || characters.length === 0) {
-    ss.toast("No authenticated characters found. Check GESI settings.", "Error");
-    return;
-  }
+  // Set your standard POCO tax rate (e.g., 10% = 0.10)
+  const TAX_RATE = 0.10; 
+
+  // Mapping fixed Base Prices for PI Tiers
+  const basePrices = {
+    "P0": 5,
+    "P1": 400,
+    "P2": 7200,
+    "P3": 60000,
+    "P4": 1200000
+  };
 
   const snapshotData = [];
-
-  // 1. Load SDE lookup data
   const typeSheet = ss.getSheetByName("SDE_invTypes");
-  const schematicSheet = ss.getSheetByName("SDE_planetSchematics");
-  
-  if (!typeSheet || !schematicSheet) {
-    ss.toast("SDE sheets missing. Please run SDE Update first.", "Error");
-    return;
-  }
-
-  // Create lookup maps {id: name}
   const typeMap = Object.fromEntries(typeSheet.getDataRange().getValues().slice(1).map(r => [r[0], r[2]]));
-  const schematicMap = Object.fromEntries(schematicSheet.getDataRange().getValues().slice(1).map(r => [r[0], r[1]]));
 
   characters.forEach(charName => {
-    try {
-      const planets = GESI.invokeRaw("characters_character_planets", { name: charName });
+    const planets = GESI.invokeRaw("characters_character_planets", { name: charName });
+    
+    planets.forEach(p => {
+      const layout = GESI.invokeRaw("characters_character_planets_planet", { planet_id: p.planet_id, name: charName });
       
-      planets.forEach(p => {
-        const layout = GESI.invokeRaw("characters_character_planets_planet", { 
-          planet_id: p.planet_id, 
-          name: charName 
-        });
-        
-        layout.pins.forEach(pin => {
-          let producing = "";
-          let pinType = "";
+      layout.pins.forEach(pin => {
+        let totalTaxEstimate = 0;
+        let contentsList = [];
 
-          // --- FACTORY LOGIC ---
-          if (pin.factory_details) {
-            pinType = "Factory";
-            producing = schematicMap[pin.factory_details.schematic_id] || "Unknown Schematic";
-          } 
-          // --- EXTRACTOR LOGIC ---
-          else if (pin.extractor_details) {
-            pinType = "Extractor";
-            producing = typeMap[pin.extractor_details.product_type_id] || "Raw Material";
-          } 
-          // --- STORAGE / LAUNCHPAD / CC LOGIC ---
-          else {
-            pinType = "Structure";
-            // Map the pin's own type_id to its name (e.g., "Launchpad" or "Storage Facility")
-            producing = typeMap[pin.type_id] || "Unknown Structure";
-          }
+        if (pin.contents) {
+          pin.contents.forEach(item => {
+            const name = typeMap[item.type_id] || "Unknown Item";
+            const tier = getPITier(name); // Helper function to determine P0-P4
+            const price = basePrices[tier] || 0;
+            
+            const itemTax = (price * item.amount * TAX_RATE);
+            totalTaxEstimate += itemTax;
+            contentsList.push(`${name} (${item.amount})`);
+          });
+        }
 
-          snapshotData.push([
-            charName,
-            p.planet_id,
-            p.planet_type,
-            pinType,
-            producing,
-            pin.expiry_time ? new Date(pin.expiry_time) : "N/A" // Structures don't usually expire
-          ]);
-        });
+        // Logic to push row to snapshotData...
+         [... totalTaxEstimate.toFixed(2), contentsList.join(", ")]
       });
-    } catch (e) {
-      console.error(`Error processing PI for ${charName}: ${e.message}`);
-    }
+    });
   });
+}
 
-  // 2. Write to Sheet
-  let reportSheet = ss.getSheetByName("PI Snapshot");
-  if (!reportSheet) reportSheet = ss.insertSheet("PI Snapshot");
+/**
+ * Updated Tax Logic to account for High-Sec NPC Tax
+ */
+function calculatePITax(itemName, amount, playerTaxRate, isHighSec) {
+  const basePrices = {
+    "P0": 5, "P1": 400, "P2": 7200, "P3": 60000, "P4": 1200000
+  };
+
+  const tier = getPITier(itemName);
+  const basePrice = basePrices[tier] || 0;
+
+  // The NPC Tax is 10% (0.10) in High-Sec, and 0% elsewhere.
+  const npcTaxRate = isHighSec ? 0.10 : 0.00;
   
-  reportSheet.clear();
-  const headers = [["Character", "Planet ID", "Planet Type", "Pin Type", "Producing / Item", "Expiry"]];
-  reportSheet.getRange(1, 1, 1, 6).setValues(headers).setFontWeight("bold");
-  
-  if (snapshotData.length > 0) {
-    reportSheet.getRange(2, 1, snapshotData.length, 6).setValues(snapshotData);
-    reportSheet.autoResizeColumns(1, 6);
-  }
-  
-  ss.toast(`Snapshot complete for ${characters.length} characters.`, "Success");
+  // Total Tax = (Player Rate + NPC Rate)
+  const totalTaxRate = playerTaxRate + npcTaxRate;
+
+  return basePrice * amount * totalTaxRate;
+}
+
+/**
+ * Simple helper to determine PI Tier based on item names or SDE groupIDs.
+ */
+function getPITier(name) {
+  // You can refine this using groupIDs from your SDE_invTypes sheet
+  if (["Aqueous Liquids", "Ionic Solutions", "Base Metals", "Noble Metals", "Heavy Metals"].includes(name)) return "P0";
+  if (["Water", "Electrolytes", "Reactive Metals", "Precious Metals", "Toxic Metals"].includes(name)) return "P1";
+  if (["Coolant", "Mechanical Parts", "Enriched Uranium", "Construction Blocks"].includes(name)) return "P2";
+  return "P3"; 
 }
