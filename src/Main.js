@@ -31,11 +31,13 @@ function GET_UTILITY_CONFIG() {
 // --- MENU & UI ---
 
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('Market Sheet Tools')
-    .addItem('Refresh All Data', 'refreshData')
-    .addItem('Update SDE Data', 'sde_job_START') // <--- Pointing to the NEW Engine
-    .addToUi();
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('Market Sheet Tools')
+      .addItem('📊 Update SDE Database', 'sde_job_START')
+      .addItem('2. Refresh Planet Snapshot', 'runPlanetarySnapshot')
+      .addSeparator()
+      .addItem('3. Generate Reset Plan', 'generateResetPlan')
+      .addToUi();
 }
 
 /**

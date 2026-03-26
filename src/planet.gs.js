@@ -1,49 +1,9 @@
-/**
- * Refined Reset Plan: Targets BOM materials and flags structure volume.
- */
-function generateResetPlan() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const snapshot = ss.getSheetByName("PI Snapshot").getDataRange().getValues();
-  const report = [];
-  const now = new Date();
-  
-  snapshot.forEach((row, index) => {
-    if (index === 0) return;
-    const [char, pID, pType, pinType, item, status] = row;
-    const statusStr = String(status);
-    
-    // Check if the extractor is dead or factories are idle
-    const needsReset = (status instanceof Date && status < now) || 
-                       statusStr.includes("Stopped") || 
-                       statusStr.includes("Idle");
+const FARM_SHEET_ID = "180S33u9KePHhxGIoCaKlgmrcQoKagDCOL2L1Hh6u9ks";
 
-    if (needsReset) {
-      let action = "Reset Extractors";
-      if (item.includes("Facility")) action = "Install Schematic: " + getTargetSchematic(pType);
-      
-      report.push([char, pType, pID, action]);
-    }
-  });
-
-  // Helper to map your BOM needs to your planet types
-  function getTargetSchematic(type) {
-    type = String(type).toLowerCase();
-    if (type === "barren") return "Mechanical Parts";
-    if (type === "gas") return "Coolant";
-    if (type === "lava") return "Enriched Uranium / Construction Blocks";
-    return "Check BOM Requirements";
-  }
-
-  // Write to Action Plan
-  const planSheet = ss.getSheetByName("Login Action Plan") || ss.insertSheet("Login Action Plan");
-  planSheet.clear().getRange(1,1,1,4).setValues([["Character", "Type", "ID", "Action Required"]]);
-  if (report.length > 0) planSheet.getRange(2,1,report.length,4).setValues(report);
-  
-  ss.toast("Action Plan Updated for BOM Production.");
-}
 
 /**
  * Processes all planets and includes an estimated tax cost for stored materials.
+ * (Repaired to prevent 1 character from breaking the entire loop)
  */
 function runPlanetarySnapshot() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -54,11 +14,7 @@ function runPlanetarySnapshot() {
 
   // Mapping fixed Base Prices for PI Tiers
   const basePrices = {
-    "P0": 5,
-    "P1": 400,
-    "P2": 7200,
-    "P3": 60000,
-    "P4": 1200000
+    "P0": 5, "P1": 400, "P2": 7200, "P3": 60000, "P4": 1200000
   };
 
   const snapshotData = [];
@@ -66,32 +22,233 @@ function runPlanetarySnapshot() {
   const typeMap = Object.fromEntries(typeSheet.getDataRange().getValues().slice(1).map(r => [r[0], r[2]]));
 
   characters.forEach(charName => {
-    const planets = GESI.invokeRaw("characters_character_planets", { name: charName });
-    
-    planets.forEach(p => {
-      const layout = GESI.invokeRaw("characters_character_planets_planet", { planet_id: p.planet_id, name: charName });
+    try {
+      // Attempt to pull data for this specific toon
+      const planets = GESI.invokeRaw("characters_character_planets", { name: charName });
       
-      layout.pins.forEach(pin => {
-        let totalTaxEstimate = 0;
-        let contentsList = [];
+      planets.forEach(p => {
+        const layout = GESI.invokeRaw("characters_character_planets_planet", { planet_id: p.planet_id, name: charName });
+        
+        layout.pins.forEach(pin => {
+          let totalTaxEstimate = 0;
+          let contentsList = [];
+          let status = "N/A";
 
-        if (pin.contents) {
-          pin.contents.forEach(item => {
-            const name = typeMap[item.type_id] || "Unknown Item";
-            const tier = getPITier(name); // Helper function to determine P0-P4
-            const price = basePrices[tier] || 0;
-            
-            const itemTax = (price * item.amount * TAX_RATE);
-            totalTaxEstimate += itemTax;
-            contentsList.push(`${name} (${item.amount})`);
-          });
-        }
+          // Attempting to deduce status from pin data
+          if (pin.extractor_details && pin.extractor_details.expiry_time) {
+             status = new Date(pin.extractor_details.expiry_time);
+          } else if (!pin.schematic_id && pin.type_id !== 2256) { // 2256 is Command Center
+             status = "Idle (No Schematic)";
+          }
 
-        // Logic to push row to snapshotData...
-         [... totalTaxEstimate.toFixed(2), contentsList.join(", ")]
+          if (pin.contents) {
+            pin.contents.forEach(item => {
+              const name = typeMap[item.type_id] || "Unknown Item";
+              const tier = getPITier(name); 
+              const price = basePrices[tier] || 0;
+              
+              const itemTax = (price * item.amount * TAX_RATE);
+              totalTaxEstimate += itemTax;
+              contentsList.push(`${name} (${item.amount})`);
+            });
+          }
+
+          snapshotData.push([
+            charName, 
+            p.planet_id, 
+            p.planet_type, 
+            typeMap[pin.type_id] || "Unknown Pin", 
+            pin.schematic_id || "Extractor/Storage", 
+            status,
+            contentsList.join(", "),
+            totalTaxEstimate.toFixed(2)
+          ]);
+        });
       });
-    });
+      
+      Logger.log("Successfully updated: " + charName);
+    } catch (e) {
+      // If one fails, we log it but DON'T stop the script
+      Logger.log("FAILED to update " + charName + ": " + e.message);
+      snapshotData.push([charName, "ERROR", "AUTH EXPIRED", "N/A", "N/A", "Please Re-Auth", "N/A", "0.00"]);
+    }
   });
+
+  const snapshotSheet = ss.getSheetByName("PI Snapshot");
+  if (snapshotData.length > 0) {
+    snapshotSheet.clearContents();
+    snapshotSheet.getRange(1, 1, 1, 8).setValues([["Character", "Planet ID", "Type", "Pin", "Producing", "Status", "Contents", "Tax Est"]]);
+    snapshotSheet.getRange(2, 1, snapshotData.length, 8).setValues(snapshotData);
+  }
+}
+
+/**
+ * Generates the Action Plan by exploding the Farm's P4 needs into P1/P2/P3 components.
+ * Includes verbose logging and Planet ID de-duplication.
+ */
+function generateResetPlan() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const snapshotRange = ss.getSheetByName("PI Snapshot").getDataRange();
+  
+  Logger.log("=== STARTING GENERATE RESET PLAN ===");
+  if (snapshotRange.getNumRows() < 2) return;
+  
+  const snapshot = snapshotRange.getValues();
+  const now = new Date();
+  
+  // 1. Build the "PI Pantry" and ID lookup maps
+  const { nameToId, idToName } = getInvTypesMap(ss);
+  const piMaterialMap = getPiMaterialMap(ss);
+  
+  // 2. Ask the Farm what it wants
+  const activeDeficits = getActiveFarmDeficits();
+  
+  // 3. EXPLODE the needs
+  const allNeededTypeIDs = explodeRequirements(activeDeficits, nameToId, piMaterialMap);
+
+  let stoppedCount = 0;
+  
+  // Use a Map to ensure we only get ONE row per Planet ID
+  const uniqueActions = new Map(); 
+
+  // 4. Scan your planets
+  snapshot.forEach((row, index) => {
+    if (index === 0) return;
+    const [char, pID, pType, pin, producing, status] = row;
+    
+    const isStopped = (status instanceof Date && status < now) || String(status).includes("Stopped") || String(status).includes("Idle");
+
+    if (isStopped) {
+      stoppedCount++;
+      const planetOutputName = getOutputByPlanetType(pType); 
+      const planetOutputID = nameToId.get(planetOutputName);
+
+      // THE DEEP FILTER
+      if (planetOutputID && allNeededTypeIDs.has(planetOutputID)) {
+        
+        // If we haven't already flagged this specific planet ID, add it
+        if (!uniqueActions.has(pID)) {
+          const isDirectNeed = activeDeficits.includes(planetOutputName);
+          const reason = isDirectNeed ? "DIRECT FARM NEED" : "SUB-COMPONENT REQUIRED";
+          
+          uniqueActions.set(pID, [char, pType, pID, `ACTION: Restart ${planetOutputName} [${reason}]`]);
+          Logger.log(`FLAGGED: ${char} - ${pType} planet building ${planetOutputName} (${reason})`);
+        }
+      }
+    }
+  });
+
+  // Convert our unique map back into an array for the spreadsheet
+  const report = Array.from(uniqueActions.values());
+
+  Logger.log(`Summary: ${stoppedCount} pins are idle/stopped. Generated ${report.length} consolidated planet actions.`);
+
+  // 5. Write to Action Plan
+  const planSheet = ss.getSheetByName("Login Action Plan") || ss.insertSheet("Login Action Plan");
+  planSheet.clear().getRange(1,1,1,4).setValues([["Character", "Type", "ID", "Action Required"]]);
+  
+  if (report.length > 0) {
+    planSheet.getRange(2,1,report.length,4).setValues(report);
+  }
+  
+  const finalMessage = report.length > 0 ? `Reset Plan Generated: ${report.length} planets need attention.` : "Breather mode: No critical PI needed.";
+  Logger.log(`=== FINISHED: ${finalMessage} ===`);
+  ss.toast(finalMessage);
+}
+
+/**
+ * THE PI PANTRY ENGINE
+ * Adapts your logic to read SDE_planetSchematicsTypeMap
+ */
+function getPiMaterialMap(ss) {
+  const typeMapData = ss.getSheetByName("SDE_planetSchematicsTypeMap").getDataRange().getValues();
+  const schemInputs = {};
+  const schemOutputs = {};
+
+  for (let i = 1; i < typeMapData.length; i++) {
+    const [schemID, typeID, qty, isInput] = typeMapData[i];
+    if (Number(isInput) === 1) {
+      if (!schemInputs[schemID]) schemInputs[schemID] = [];
+      schemInputs[schemID].push(Number(typeID));
+    } else {
+      schemOutputs[schemID] = Number(typeID);
+    }
+  }
+
+  const piMaterialMap = new Map();
+  for (const schemID in schemOutputs) {
+    const outID = schemOutputs[schemID];
+    piMaterialMap.set(outID, schemInputs[schemID] || []);
+  }
+  return piMaterialMap;
+}
+
+/**
+ * RECURSIVE EXPLODER
+ */
+function explodeRequirements(targetNames, nameToId, piMaterialMap) {
+  const neededIds = new Set();
+  function drillDown(typeId) {
+    neededIds.add(typeId); 
+    const inputs = piMaterialMap.get(typeId); 
+    if (inputs) {
+      inputs.forEach(inputId => drillDown(inputId)); 
+    }
+  }
+  targetNames.forEach(name => {
+     const id = nameToId.get(name);
+     if (id) drillDown(id);
+  });
+  return neededIds;
+}
+
+/**
+ * Helper to get active Deficits from the Market-Tycoon Farm
+ */
+function getActiveFarmDeficits() {
+  const deficits = [];
+  try {
+    const ssFarm = SpreadsheetApp.openById(FARM_SHEET_ID);
+    const reqSheet = ssFarm.getSheetByName("Consolidated_Requirements");
+    const data = reqSheet.getDataRange().getValues();
+
+    for (let i = 1; i < data.length; i++) {
+      const itemName = data[i][0];
+      const netNeed = parseFloat(String(data[i][4]).replace(/[^0-9.-]+/g,""));
+      if (netNeed > 0 && itemName) deficits.push(itemName);
+    }
+  } catch (e) {
+    Logger.log("Could not reach Farm: " + e.message);
+  }
+  return deficits;
+}
+
+/**
+ * Helper to build ID <-> Name lookups
+ */
+function getInvTypesMap(ss) {
+  const data = ss.getSheetByName("SDE_invTypes").getDataRange().getValues();
+  const nameToId = new Map();
+  const idToName = new Map();
+  for(let i=1; i<data.length; i++) {
+    const id = Number(data[i][0]);
+    const name = String(data[i][2]).trim();
+    idToName.set(id, name);
+    nameToId.set(name, id);
+  }
+  return { nameToId, idToName };
+}
+
+/**
+ * Default Planet mapping
+ */
+function getOutputByPlanetType(type) {
+  type = String(type).toLowerCase();
+  if (type === "barren") return "Mechanical Parts";
+  if (type === "gas") return "Coolant";
+  if (type === "lava") return "Enriched Uranium";
+  if (type === "temperate") return "Organic Mortar Applicators"; 
+  return "Unknown";
 }
 
 /**
@@ -104,11 +261,7 @@ function calculatePITax(itemName, amount, playerTaxRate, isHighSec) {
 
   const tier = getPITier(itemName);
   const basePrice = basePrices[tier] || 0;
-
-  // The NPC Tax is 10% (0.10) in High-Sec, and 0% elsewhere.
   const npcTaxRate = isHighSec ? 0.10 : 0.00;
-  
-  // Total Tax = (Player Rate + NPC Rate)
   const totalTaxRate = playerTaxRate + npcTaxRate;
 
   return basePrice * amount * totalTaxRate;
@@ -118,9 +271,9 @@ function calculatePITax(itemName, amount, playerTaxRate, isHighSec) {
  * Simple helper to determine PI Tier based on item names or SDE groupIDs.
  */
 function getPITier(name) {
-  // You can refine this using groupIDs from your SDE_invTypes sheet
   if (["Aqueous Liquids", "Ionic Solutions", "Base Metals", "Noble Metals", "Heavy Metals"].includes(name)) return "P0";
   if (["Water", "Electrolytes", "Reactive Metals", "Precious Metals", "Toxic Metals"].includes(name)) return "P1";
   if (["Coolant", "Mechanical Parts", "Enriched Uranium", "Construction Blocks"].includes(name)) return "P2";
-  return "P3"; 
+  if (["Organic Mortar Applicators", "Ukomi Superconductor"].includes(name)) return "P3";
+  return "P4"; 
 }
