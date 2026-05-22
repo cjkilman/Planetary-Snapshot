@@ -12,7 +12,8 @@ function GET_SDE_CONFIG() {
     { name: "SDE_invTypes", file: "invTypes.csv", cols: ["typeID", "groupID", "typeName"] },
     { name: "SDE_planetSchematics", file: "planetSchematics.csv", cols: null },
     { name: "SDE_planetSchematicsPinMap", file: "planetSchematicsPinMap.csv", cols: null },
-    { name: "SDE_planetSchematicsTypeMap", file: "planetSchematicsTypeMap.csv", cols: null }
+    { name: "SDE_planetSchematicsTypeMap", file: "planetSchematicsTypeMap.csv", cols: null },
+    { name: "SDE_Planets", file: "SDE_Planets.csv", cols: null }
 
   ];
 }
